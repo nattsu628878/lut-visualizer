@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LUTとは？ — LUT Visualizer 解説</title>
+<style>
+  :root { --accent: #628878; --bg: #0d1512; --panel: #17251f; --ink: #e8f0ec; --muted: #9fb3aa; --line: #2a3a33; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); font-family: -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif; }
+  body { min-height: 100vh; padding: 24px 20px 80px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+
+  h1 { font-size: 20px; font-weight: 700; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .top-link { font-size: 12px; color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--muted); white-space: nowrap; }
+  .top-link:hover { color: var(--accent); border-color: var(--accent); }
+
+  article { margin-top: 28px; display: flex; flex-direction: column; gap: 22px; }
+  section { background: var(--panel); border-radius: 14px; padding: 18px 20px; }
+  section h2 { font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+  section h2 span { color: var(--accent); font-size: 12px; font-weight: 600; margin-right: 8px; }
+  section p, section li { font-size: 13.5px; line-height: 1.85; color: #d3ddd8; }
+  section p + p { margin-top: 10px; }
+  section ul { margin: 8px 0 0 1.2em; display: flex; flex-direction: column; gap: 6px; }
+  section code { background: rgba(98,136,120,.18); color: #b9d4c6; padding: 1px 6px; border-radius: 4px; font-size: 12.5px; }
+  section .note { margin-top: 10px; font-size: 12px; color: var(--muted); border-left: 2px solid var(--line); padding-left: 10px; }
+  .cube-example {
+    margin-top: 10px; font-size: 12px; color: var(--muted); background: #0a100d; border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; white-space: pre; line-height: 1.7;
+  }
+  .cube-example b { color: var(--ink); }
+
+  .legend-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+  @media (max-width: 560px) { .legend-grid { grid-template-columns: 1fr; } }
+  .legend-item { font-size: 12.5px; color: #d3ddd8; }
+  .legend-item b { color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div style="display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap;">
+  <h1>LUT<span>とは？</span></h1>
+  <a class="top-link" href="index.html">← ツールに戻る</a>
+</div>
+<p class="sub">LUT Visualizer の背景知識と、各パネルの読み方をまとめた解説ページ。</p>
+
+<article>
+
+<section>
+  <h2><span>01</span>LUT（Look-Up Table）とは</h2>
+  <p>LUTは「ある色を入力すると、対応する色を返す変換テーブル」。写真・映像のカラーグレーディングで、シーンの色味をまとめて別の見た目（フィルム調・特定のトーンなど）に変換するために使われる。</p>
+  <p>本質は関数 <code>f(入力RGB) → 出力RGB</code> だが、複雑な色変換をその都度リアルタイム計算する代わりに、あらかじめ代表点で計算した対応表を持っておき、その間は補間で済ませる — というのがLUTの狙い（計算コストの先払い）。</p>
+</section>
+
+<section>
+  <h2><span>02</span>1D LUT と 3D LUT</h2>
+  <p><b>1D LUT</b>: R・G・B各チャンネルを完全に独立に変換する（例: 「赤チャンネルだけこのカーブで持ち上げる」）。軽量だが、チャンネル間の相互作用（ある色相だけ彩度を変える、等）は表現できない。</p>
+  <p><b>3D LUT</b>: RGB空間全体を1つの3次元グリッドとして扱い、入力(R,G,B)の組み合わせごとに出力(R,G,B)を持つ。チャンネル間の相互作用を含む複雑な変換（特定の肌色だけ調整、フィルムのハイライトの色被り再現、等）が可能。このツールが扱うのはこちら。</p>
+</section>
+
+<section>
+  <h2><span>03</span>.cubeファイルの中身</h2>
+  <p>Adobeが策定し、DaVinci Resolve・Premiere・OBS・ffmpeg等で広く使われている業界標準の3D LUT形式。テキストファイルで、中身はシンプル。</p>
+  <div class="cube-example"><b>LUT_3D_SIZE 3</b>
+0.0 0.0 0.0
+0.5 0.0 0.0
+1.0 0.0 0.0
+0.0 0.5 0.0
+   …（N×N×N行つづく）</div>
+  <p><code>LUT_3D_SIZE N</code> は「RGB各軸をN分割したグリッド」を意味し、ファイルにはその N × N × N 個ぶんの出力色が並ぶ（Rが最も速く変化し、次にG、最後にBの順）。N=17なら4,913点、N=33なら35,937点。</p>
+  <p>グリッド点<b>以外</b>の入力色（例えば中間の値）は、周囲8点から<b>トライリニア補間</b>（3次元版の線形補間）で計算する。このツールの変換もすべてこの方式でサンプリングしている。</p>
+  <p class="note">グリッドが細かい（Nが大きい）ほど滑らかで精密だが、ファイルサイズと計算コストが増える。17〜33あたりが実用的によく使われる。</p>
+</section>
+
+<section>
+  <h2><span>04</span>使いどころ</h2>
+  <ul>
+    <li>映像・写真のカラーグレーディング（作品ごとの「色の統一感」を作る）</li>
+    <li>カメラプロファイルのシミュレーション（Log素材を特定カメラの見た目に近づける等）</li>
+    <li>フィルム調・レトロ調などのルック（見た目のスタイル）の再現・配布</li>
+    <li>モニターやプロジェクターの色補正（キャリブレーション）</li>
+  </ul>
+</section>
+
+<section>
+  <h2><span>05</span>このツールの見方</h2>
+  <div class="legend-grid">
+    <div class="legend-item"><b>3Dプロット（点群）</b><br>LUTの各グリッド点を「入力RGB位置」に配置し、「出力色」で着色。恒等変換（無加工）なら点は白いワイヤーフレームの立方体にきれいに並ぶ。ズレて見える＝そこがLUTによって変換されている、ということ。</div>
+    <div class="legend-item"><b>3Dプロット（ベクトル表示）</b><br>各グリッド点について、入力RGB位置→出力RGB位置への変位を矢印で描く。矢印の向きと長さが「その色がどの方向にどれだけ動かされるか」を表す。全体の傾向（暖色寄りにシフト、コントラストが強まる等）が一目で分かる。</div>
+    <div class="legend-item"><b>Before / After プレビュー</b><br>色相グラデーションのテスト画像にLUTを適用した結果を並べて比較。実際の画像でどんな見た目の変化になるかの直感的な確認用。</div>
+    <div class="legend-item"><b>RGB応答カーブ</b><br>入力 R=G=B（グレースケールの対角線）に沿って、出力のR・G・Bそれぞれがどう変化するかを表示。3チャンネルがずれているほど、そのLUTは色被り・トーン変化を伴っている。</div>
+  </div>
+</section>
+
+</article>
+</div>
+</body>
+</html>

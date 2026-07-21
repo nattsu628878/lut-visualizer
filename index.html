@@ -50,11 +50,23 @@
 
   .curve-wrap { margin-top: 16px; }
   #curveCanvas { width: 100%; height: 140px; border-radius: 8px; display: block; background: #0a100d; }
+
+  .plot-controls { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--muted); }
+  .plot-controls label.check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .plot-controls input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; }
+  .plot-controls .range-label { display: flex; align-items: center; gap: 8px; }
+  .plot-controls input[type=range] { width: 110px; accent-color: var(--accent); }
+
+  .top-link { font-size: 12px; color: var(--muted); text-decoration: none; border-bottom: 1px dotted var(--muted); }
+  .top-link:hover { color: var(--accent); border-color: var(--accent); }
 </style>
 </head>
 <body>
 
-<h1>LUT <span>Visualizer</span></h1>
+<div style="display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap;">
+  <h1>LUT <span>Visualizer</span></h1>
+  <a class="top-link" href="guide.html">LUTとは？（解説ページ）</a>
+</div>
 <p class="sub">3D LUT（.cubeファイル）の色変換を可視化する実験ツール。点群＝入力RGB位置に出力色を配置 / プレビュー＝グラデーションへの適用結果。</p>
 
 <div class="toolbar">
@@ -69,8 +81,14 @@
 <div class="grid">
   <div class="panel">
     <h2>3D プロット（入力RGB位置 → 出力色）</h2>
+    <div class="plot-controls">
+      <label class="check"><input type="checkbox" id="vectorToggle"> ベクトル表示</label>
+      <label class="range-label">点の大きさ
+        <input type="range" id="pointSizeRange" min="0.4" max="3" step="0.1" value="1">
+      </label>
+    </div>
     <canvas id="cubeCanvas"></canvas>
-    <p class="hint">ドラッグで回転。白いワイヤーフレーム＝恒等変換（無加工）の基準立方体。</p>
+    <p class="hint">ドラッグで回転。白いワイヤーフレーム＝恒等変換（無加工）の基準立方体。「ベクトル表示」ONで入力位置→出力位置への変位を矢印で表示。</p>
   </div>
 
   <div class="panel">
@@ -199,6 +217,7 @@
   const cubeCtx = cubeCanvas.getContext("2d");
   let rotX = -0.5, rotY = 0.7;
   let dragging = false, lastX = 0, lastY = 0;
+  let vectorMode = false, pointScale = 1;
 
   function resizeCanvasToDisplaySize(canvas) {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -243,28 +262,63 @@
     if (!lut) return;
 
     const N = lut.size;
-    const step = Math.max(1, Math.ceil(N / 15)); // cap plotted points for perf
+    const targetPerAxis = vectorMode ? 9 : 15; // vectors are busier on screen, so plot fewer
+    const step = Math.max(1, Math.ceil(N / targetPerAxis)); // cap plotted points for perf
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const pointR = Math.max(1.4, 2.2 * dpr);
-    const pts = [];
+    const pointR = Math.max(1.2, 2.2 * dpr) * pointScale;
+
+    const items = [];
     for (let bI = 0; bI < N; bI += step) {
       for (let gI = 0; gI < N; gI += step) {
         for (let rI = 0; rI < N; rI += step) {
           const out = lut.data[rI + gI * N + bI * N * N];
           const x = rI / (N - 1) - 0.5, y = gI / (N - 1) - 0.5, z = bI / (N - 1) - 0.5;
-          const p = project(x, y, z, cx, cy, scale);
           const [oR, oG, oB] = out;
-          pts.push({ p, color: `rgb(${clamp255(oR)},${clamp255(oG)},${clamp255(oB)})` });
+          const color = `rgb(${clamp255(oR)},${clamp255(oG)},${clamp255(oB)})`;
+          const pIn = project(x, y, z, cx, cy, scale);
+          if (vectorMode) {
+            const pOut = project(oR - 0.5, oG - 0.5, oB - 0.5, cx, cy, scale);
+            items.push({ depth: (pIn.depth + pOut.depth) / 2, draw: () => drawVector(pIn, pOut, color, pointR) });
+          } else {
+            items.push({ depth: pIn.depth, draw: () => drawDot(pIn, color, pointR) });
+          }
         }
       }
     }
-    pts.sort((a, b) => a.p.depth - b.p.depth); // back to front
-    for (const { p, color } of pts) {
-      cubeCtx.fillStyle = color;
-      cubeCtx.beginPath();
-      cubeCtx.arc(p.x, p.y, pointR, 0, Math.PI * 2);
-      cubeCtx.fill();
-    }
+    items.sort((a, b) => a.depth - b.depth); // back to front
+    for (const it of items) it.draw();
+  }
+
+  function drawDot(p, color, r) {
+    cubeCtx.fillStyle = color;
+    cubeCtx.beginPath();
+    cubeCtx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    cubeCtx.fill();
+  }
+
+  // line from input RGB position to output RGB position, both plotted as points
+  // in the same cube — visualizes how the LUT displaces each color.
+  function drawVector(p0, p1, color, r) {
+    cubeCtx.strokeStyle = color;
+    cubeCtx.lineWidth = Math.max(1, r * 0.7);
+    cubeCtx.beginPath();
+    cubeCtx.moveTo(p0.x, p0.y);
+    cubeCtx.lineTo(p1.x, p1.y);
+    cubeCtx.stroke();
+
+    cubeCtx.fillStyle = "rgba(232,240,236,0.35)";
+    cubeCtx.beginPath();
+    cubeCtx.arc(p0.x, p0.y, Math.max(1, r * 0.5), 0, Math.PI * 2);
+    cubeCtx.fill();
+
+    const angle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+    const headLen = Math.max(3, r * 2.2);
+    cubeCtx.beginPath();
+    cubeCtx.moveTo(p1.x, p1.y);
+    cubeCtx.lineTo(p1.x - headLen * Math.cos(angle - Math.PI / 7), p1.y - headLen * Math.sin(angle - Math.PI / 7));
+    cubeCtx.moveTo(p1.x, p1.y);
+    cubeCtx.lineTo(p1.x - headLen * Math.cos(angle + Math.PI / 7), p1.y - headLen * Math.sin(angle + Math.PI / 7));
+    cubeCtx.stroke();
   }
 
   function clamp255(v) { return Math.round(Math.min(1, Math.max(0, v)) * 255); }
@@ -283,6 +337,11 @@
     drawCube();
   });
   window.addEventListener("pointerup", () => { dragging = false; cubeCanvas.classList.remove("grabbing"); });
+
+  const vectorToggle = document.getElementById("vectorToggle");
+  const pointSizeRange = document.getElementById("pointSizeRange");
+  vectorToggle.addEventListener("change", () => { vectorMode = vectorToggle.checked; drawCube(); });
+  pointSizeRange.addEventListener("input", () => { pointScale = parseFloat(pointSizeRange.value); drawCube(); });
 
   // ---------- before/after preview ----------
   const beforeCanvas = document.getElementById("beforeCanvas");
