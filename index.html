@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LUT Visualizer</title>
+<style>
+  :root { --accent: #628878; --bg: #0d1512; --panel: #17251f; --ink: #e8f0ec; --muted: #9fb3aa; --line: #2a3a33; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--ink); font-family: -apple-system, "Hiragino Sans", "Yu Gothic", sans-serif; }
+  body { min-height: 100vh; padding: 24px 20px 60px; }
+  h1 { font-size: 20px; font-weight: 700; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 20px 0; }
+  .btn {
+    appearance: none; border: 1px solid var(--accent); background: transparent; color: var(--accent);
+    font-size: 13px; font-weight: 600; padding: 9px 16px; border-radius: 999px; cursor: pointer;
+  }
+  .btn:hover { background: rgba(98,136,120,.15); }
+  .btn.primary { background: var(--accent); color: #0d1512; }
+  .btn.primary:hover { background: #72a08d; }
+  input[type=file] { display: none; }
+
+  #dropzone {
+    border: 1px dashed var(--line); border-radius: 12px; padding: 10px 16px; font-size: 12px;
+    color: var(--muted); flex: 1 1 220px; min-width: 200px;
+  }
+  #dropzone.drag { border-color: var(--accent); color: var(--ink); }
+
+  .info { font-size: 12px; color: var(--muted); margin-bottom: 18px; min-height: 16px; }
+  .info b { color: var(--ink); font-weight: 600; }
+  .info.error { color: #d98a7a; }
+
+  .grid { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr); gap: 20px; }
+  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel { background: var(--panel); border-radius: 14px; padding: 16px; }
+  .panel h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 10px; letter-spacing: .02em; }
+
+  #cubeCanvas { width: 100%; aspect-ratio: 1 / 1; border-radius: 10px; cursor: grab; touch-action: none; background: #0a100d; display: block; }
+  #cubeCanvas.grabbing { cursor: grabbing; }
+  .hint { font-size: 11px; color: #6f847b; margin-top: 8px; }
+
+  .preview-row { display: flex; gap: 10px; }
+  .preview-col { flex: 1; min-width: 0; }
+  .preview-col label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  canvas.preview { width: 100%; aspect-ratio: 4 / 3; border-radius: 8px; display: block; background: #0a100d; }
+
+  .curve-wrap { margin-top: 16px; }
+  #curveCanvas { width: 100%; height: 140px; border-radius: 8px; display: block; background: #0a100d; }
+</style>
+</head>
+<body>
+
+<h1>LUT <span>Visualizer</span></h1>
+<p class="sub">3D LUT（.cubeファイル）の色変換を可視化する実験ツール。点群＝入力RGB位置に出力色を配置 / プレビュー＝グラデーションへの適用結果。</p>
+
+<div class="toolbar">
+  <button class="btn primary" id="pickBtn">.cubeファイルを開く</button>
+  <input type="file" id="fileInput" accept=".cube,.CUBE,text/plain">
+  <button class="btn" id="sampleBtn">サンプルLUTを試す</button>
+  <div id="dropzone">ここにドラッグ&ドロップでも読み込めます</div>
+</div>
+
+<div class="info" id="info">LUTを読み込むと情報が表示されます。</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>3D プロット（入力RGB位置 → 出力色）</h2>
+    <canvas id="cubeCanvas"></canvas>
+    <p class="hint">ドラッグで回転。白いワイヤーフレーム＝恒等変換（無加工）の基準立方体。</p>
+  </div>
+
+  <div class="panel">
+    <h2>適用プレビュー</h2>
+    <div class="preview-row">
+      <div class="preview-col">
+        <label>Before（テストグラデーション）</label>
+        <canvas class="preview" id="beforeCanvas"></canvas>
+      </div>
+      <div class="preview-col">
+        <label>After（LUT適用後）</label>
+        <canvas class="preview" id="afterCanvas"></canvas>
+      </div>
+    </div>
+    <div class="curve-wrap">
+      <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:6px;">RGB応答カーブ（対角線 R=G=B の入出力）</label>
+      <canvas id="curveCanvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- .cube parser ----------
+  function parseCube(text) {
+    const lines = text.split(/\r?\n/);
+    let size = 0, title = "";
+    let domainMin = [0, 0, 0], domainMax = [1, 1, 1];
+    const data = [];
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const head = line.split(/\s+/)[0];
+      if (head === "TITLE") { title = line.slice(5).trim().replace(/^"|"$/g, ""); continue; }
+      if (head === "LUT_3D_SIZE") { size = parseInt(line.split(/\s+/)[1], 10); continue; }
+      if (head === "LUT_1D_SIZE") { throw new Error("1D LUTには未対応です（3D LUTのみ対応）"); }
+      if (head === "DOMAIN_MIN") { domainMin = line.split(/\s+/).slice(1).map(Number); continue; }
+      if (head === "DOMAIN_MAX") { domainMax = line.split(/\s+/).slice(1).map(Number); continue; }
+      const parts = line.split(/\s+/).map(Number);
+      if (parts.length === 3 && parts.every((n) => !Number.isNaN(n))) data.push(parts);
+    }
+    if (!size) throw new Error("LUT_3D_SIZE が見つかりません");
+    if (data.length !== size * size * size) {
+      throw new Error(`データ数が size と一致しません（期待 ${size ** 3}, 実際 ${data.length}）`);
+    }
+    return { title, size, domainMin, domainMax, data };
+  }
+
+  // ---------- trilinear sampling ----------
+  function makeSampler(lut) {
+    const N = lut.size;
+    const at = (r, g, b) => lut.data[r + g * N + b * N * N];
+    return function sample(r, g, b) {
+      r = Math.min(Math.max(r, 0), 1) * (N - 1);
+      g = Math.min(Math.max(g, 0), 1) * (N - 1);
+      b = Math.min(Math.max(b, 0), 1) * (N - 1);
+      const r0 = Math.floor(r), g0 = Math.floor(g), b0 = Math.floor(b);
+      const r1 = Math.min(r0 + 1, N - 1), g1 = Math.min(g0 + 1, N - 1), b1 = Math.min(b0 + 1, N - 1);
+      const fr = r - r0, fg = g - g0, fb = b - b0;
+      const c000 = at(r0, g0, b0), c100 = at(r1, g0, b0), c010 = at(r0, g1, b0), c110 = at(r1, g1, b0);
+      const c001 = at(r0, g0, b1), c101 = at(r1, g0, b1), c011 = at(r0, g1, b1), c111 = at(r1, g1, b1);
+      const out = [0, 0, 0];
+      for (let ch = 0; ch < 3; ch++) {
+        const c00 = c000[ch] * (1 - fr) + c100[ch] * fr;
+        const c10 = c010[ch] * (1 - fr) + c110[ch] * fr;
+        const c01 = c001[ch] * (1 - fr) + c101[ch] * fr;
+        const c11 = c011[ch] * (1 - fr) + c111[ch] * fr;
+        const c0 = c00 * (1 - fg) + c10 * fg;
+        const c1 = c01 * (1 - fg) + c11 * fg;
+        out[ch] = c0 * (1 - fb) + c1 * fb;
+      }
+      return out;
+    };
+  }
+
+  // ---------- sample LUT generator (procedural, no file needed) ----------
+  function buildSampleCubeText() {
+    const N = 17;
+    const lines = ["TITLE \"sample warm-contrast\"", `LUT_3D_SIZE ${N}`];
+    for (let b = 0; b < N; b++) {
+      for (let g = 0; g < N; g++) {
+        for (let r = 0; r < N; r++) {
+          let R = r / (N - 1), G = g / (N - 1), B = b / (N - 1);
+          // S-curve contrast
+          const scurve = (x) => x * x * (3 - 2 * x);
+          R = scurve(R); G = scurve(G); B = scurve(B);
+          // warm shift: push red up, blue down; lift shadows slightly
+          R = Math.min(1, R * 1.12 + 0.02);
+          G = Math.min(1, G * 1.02);
+          B = Math.max(0, B * 0.85);
+          lines.push(`${R.toFixed(6)} ${G.toFixed(6)} ${B.toFixed(6)}`);
+        }
+      }
+    }
+    return lines.join("\n");
+  }
+
+  // ---------- state ----------
+  let lut = null, sampler = null;
+  const info = document.getElementById("info");
+
+  function setInfo(msg, isError) {
+    info.textContent = msg;
+    info.classList.toggle("error", !!isError);
+  }
+
+  function loadLUT(text, sourceName) {
+    try {
+      lut = parseCube(text);
+      sampler = makeSampler(lut);
+      setInfo(`読み込み成功: ${sourceName} — `, false);
+      const b = document.createElement("b");
+      info.append(document.createTextNode(`タイトル "${lut.title || "(なし)"}" / サイズ ${lut.size}³ / 点数 ${lut.data.length.toLocaleString()}`));
+      renderAll();
+    } catch (e) {
+      lut = null; sampler = null;
+      setInfo(`読み込み失敗: ${e.message}`, true);
+      clearAll();
+    }
+  }
+
+  // ---------- 3D point cloud ----------
+  const cubeCanvas = document.getElementById("cubeCanvas");
+  const cubeCtx = cubeCanvas.getContext("2d");
+  let rotX = -0.5, rotY = 0.7;
+  let dragging = false, lastX = 0, lastY = 0;
+
+  function resizeCanvasToDisplaySize(canvas) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    return dpr;
+  }
+
+  function project(x, y, z, cx, cy, scale) {
+    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    const x1 = x * cosY - z * sinY;
+    const z1 = x * sinY + z * cosY;
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+    const y1 = y * cosX - z1 * sinX;
+    const z2 = y * sinX + z1 * cosX;
+    const persp = 2.6 / (2.6 + z2);
+    return { x: cx + x1 * scale * persp, y: cy - y1 * scale * persp, depth: z2 };
+  }
+
+  function drawCube() {
+    resizeCanvasToDisplaySize(cubeCanvas);
+    const w = cubeCanvas.width, h = cubeCanvas.height;
+    cubeCtx.clearRect(0, 0, w, h);
+    const cx = w / 2, cy = h / 2, scale = Math.min(w, h) * 0.34;
+
+    // wireframe reference cube (corners at -0.5..0.5)
+    const corners = [];
+    for (let i = 0; i < 8; i++) {
+      corners.push([(i & 1 ? 0.5 : -0.5), (i & 2 ? 0.5 : -0.5), (i & 4 ? 0.5 : -0.5)]);
+    }
+    const edges = [[0,1],[0,2],[1,3],[2,3],[4,5],[4,6],[5,7],[6,7],[0,4],[1,5],[2,6],[3,7]];
+    cubeCtx.strokeStyle = "rgba(232,240,236,0.25)";
+    cubeCtx.lineWidth = 1;
+    for (const [a, bI] of edges) {
+      const pa = project(...corners[a], cx, cy, scale);
+      const pb = project(...corners[bI], cx, cy, scale);
+      cubeCtx.beginPath(); cubeCtx.moveTo(pa.x, pa.y); cubeCtx.lineTo(pb.x, pb.y); cubeCtx.stroke();
+    }
+
+    if (!lut) return;
+
+    const N = lut.size;
+    const step = Math.max(1, Math.ceil(N / 15)); // cap plotted points for perf
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const pointR = Math.max(1.4, 2.2 * dpr);
+    const pts = [];
+    for (let bI = 0; bI < N; bI += step) {
+      for (let gI = 0; gI < N; gI += step) {
+        for (let rI = 0; rI < N; rI += step) {
+          const out = lut.data[rI + gI * N + bI * N * N];
+          const x = rI / (N - 1) - 0.5, y = gI / (N - 1) - 0.5, z = bI / (N - 1) - 0.5;
+          const p = project(x, y, z, cx, cy, scale);
+          const [oR, oG, oB] = out;
+          pts.push({ p, color: `rgb(${clamp255(oR)},${clamp255(oG)},${clamp255(oB)})` });
+        }
+      }
+    }
+    pts.sort((a, b) => a.p.depth - b.p.depth); // back to front
+    for (const { p, color } of pts) {
+      cubeCtx.fillStyle = color;
+      cubeCtx.beginPath();
+      cubeCtx.arc(p.x, p.y, pointR, 0, Math.PI * 2);
+      cubeCtx.fill();
+    }
+  }
+
+  function clamp255(v) { return Math.round(Math.min(1, Math.max(0, v)) * 255); }
+
+  cubeCanvas.addEventListener("pointerdown", (e) => {
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    cubeCanvas.classList.add("grabbing");
+    cubeCanvas.setPointerCapture(e.pointerId);
+  });
+  cubeCanvas.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    rotY += (e.clientX - lastX) * 0.008;
+    rotX += (e.clientY - lastY) * -0.008;
+    rotX = Math.max(-1.5, Math.min(1.5, rotX));
+    lastX = e.clientX; lastY = e.clientY;
+    drawCube();
+  });
+  window.addEventListener("pointerup", () => { dragging = false; cubeCanvas.classList.remove("grabbing"); });
+
+  // ---------- before/after preview ----------
+  const beforeCanvas = document.getElementById("beforeCanvas");
+  const afterCanvas = document.getElementById("afterCanvas");
+
+  function hsv2rgb(h, s, v) {
+    const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+    let r, g, b;
+    if (h < 60) [r, g, b] = [c, x, 0];
+    else if (h < 120) [r, g, b] = [x, c, 0];
+    else if (h < 180) [r, g, b] = [0, c, x];
+    else if (h < 240) [r, g, b] = [0, x, c];
+    else if (h < 300) [r, g, b] = [x, 0, c];
+    else [r, g, b] = [c, 0, x];
+    return [r + m, g + m, b + m];
+  }
+
+  function drawPreview(canvas, transform) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    resizeCanvasToDisplaySize(canvas);
+    const ctx = canvas.getContext("2d");
+    const w = canvas.width, h = canvas.height;
+    const img = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const v = 1 - y / (h - 1); // brightness top(1)->bottom(0)
+      for (let x = 0; x < w; x++) {
+        const hue = (x / (w - 1)) * 360;
+        let [r, g, b] = hsv2rgb(hue, 0.85, v);
+        if (transform) [r, g, b] = transform(r, g, b);
+        const idx = (y * w + x) * 4;
+        img.data[idx] = clamp255(r);
+        img.data[idx + 1] = clamp255(g);
+        img.data[idx + 2] = clamp255(b);
+        img.data[idx + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // ---------- response curve (diagonal R=G=B) ----------
+  const curveCanvas = document.getElementById("curveCanvas");
+  function drawCurve() {
+    resizeCanvasToDisplaySize(curveCanvas);
+    const ctx = curveCanvas.getContext("2d");
+    const w = curveCanvas.width, h = curveCanvas.height;
+    ctx.clearRect(0, 0, w, h);
+    const pad = 10 * (w / curveCanvas.clientWidth || 1);
+    // identity reference
+    ctx.strokeStyle = "rgba(232,240,236,0.2)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad, h - pad); ctx.lineTo(w - pad, pad); ctx.stroke();
+
+    if (!sampler) return;
+    const channels = [["#e66767", "R", 0], ["#008300", "G", 1], ["#3987e5", "B", 2]];
+    const steps = 64;
+    const fontPx = 11 * (w / curveCanvas.clientWidth || 1);
+    for (const [color, label, ch] of channels) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let endX = 0, endY = 0;
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const out = sampler(t, t, t)[ch];
+        const px = pad + t * (w - 2 * pad);
+        const py = h - pad - out * (h - 2 * pad);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        endX = px; endY = py;
+      }
+      ctx.stroke();
+      // direct label at the line's end (identity isn't color-only)
+      ctx.fillStyle = color;
+      ctx.font = `600 ${fontPx}px sans-serif`;
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, Math.min(endX + 4, w - fontPx), endY);
+    }
+  }
+
+  function clearAll() {
+    drawCube();
+    drawPreview(beforeCanvas, null);
+    drawPreview(afterCanvas, null);
+    drawCurve();
+  }
+
+  function renderAll() {
+    drawCube();
+    drawPreview(beforeCanvas, null);
+    drawPreview(afterCanvas, sampler ? (r, g, b) => sampler(r, g, b) : null);
+    drawCurve();
+  }
+
+  // ---------- file input / drag&drop ----------
+  const pickBtn = document.getElementById("pickBtn");
+  const fileInput = document.getElementById("fileInput");
+  const sampleBtn = document.getElementById("sampleBtn");
+  const dropzone = document.getElementById("dropzone");
+
+  pickBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files[0];
+    if (!f) return;
+    f.text().then((text) => loadLUT(text, f.name));
+  });
+  sampleBtn.addEventListener("click", () => loadLUT(buildSampleCubeText(), "サンプル(生成)"));
+
+  ["dragenter", "dragover"].forEach((ev) =>
+    dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("drag"); })
+  );
+  ["dragleave", "drop"].forEach((ev) =>
+    dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("drag"); })
+  );
+  dropzone.addEventListener("drop", (e) => {
+    const f = e.dataTransfer.files[0];
+    if (!f) return;
+    f.text().then((text) => loadLUT(text, f.name));
+  });
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => e.preventDefault());
+
+  window.addEventListener("resize", () => { if (lut) renderAll(); else clearAll(); });
+
+  clearAll();
+})();
+</script>
+</body>
+</html>
